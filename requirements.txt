@@ -3,3 +3,4 @@ pandas==2.2.3
 folium==0.15.0
 streamlit-folium==0.15.0
 requests==2.31.0
+aiohttp==3.9.1

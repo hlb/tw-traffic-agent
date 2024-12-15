@@ -4,6 +4,9 @@ import folium
 from streamlit_folium import folium_static
 import json
 import requests
+import asyncio
+import aiohttp
+from concurrent.futures import ThreadPoolExecutor
 
 # 設置頁面為寬螢幕模式
 st.set_page_config(layout="wide")
@@ -142,27 +145,48 @@ with col2:
                     fill_color='red'
                 ).add_to(m)
         
-        # 使用 OSRM 獲取實際路線並繪製
-        @st.cache_data
-        def get_route_between_points(start_lon, start_lat, end_lon, end_lat):
-            url = f"http://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}?overview=full&geometries=geojson"
-            response = requests.get(url)
-            if response.status_code == 200:
-                route = response.json()
-                if "routes" in route and len(route["routes"]) > 0:
-                    return route["routes"][0]["geometry"]["coordinates"]
-            return None
+        # 使用 OSRM 批次獲取路線
+        async def get_routes_batch(stops):
+            routes_data = []
+            connector = aiohttp.TCPConnector(limit=10)  # 限制同時連接數
+            async with aiohttp.ClientSession(connector=connector) as session:
+                tasks = []
+                for i in range(len(stops) - 1):
+                    start = stops[i]
+                    end = stops[i + 1]
+                    url = f"http://router.project-osrm.org/route/v1/driving/{start['StopPosition']['PositionLon']},{start['StopPosition']['PositionLat']};{end['StopPosition']['PositionLon']},{end['StopPosition']['PositionLat']}?overview=full&geometries=geojson"
+                    tasks.append(asyncio.ensure_future(session.get(url)))
+                
+                responses = await asyncio.gather(*tasks)
+                for response in responses:
+                    route_data = await response.json()
+                    if "routes" in route_data and len(route_data["routes"]) > 0:
+                        routes_data.append(route_data["routes"][0]["geometry"]["coordinates"])
+                    else:
+                        routes_data.append(None)
+            return routes_data
+
+        # 使用快取儲存路線資料
+        @st.cache_data(ttl=3600)
+        def get_cached_route_data(stops_key):
+            """
+            快取路線資料的包裝函數
+            stops_key: 用於快取的唯一鍵值，例如路線ID和方向
+            """
+            stops_data = valid_stops  # 這裡使用外部變數，實際使用時應該作為參數傳入
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(get_routes_batch(stops_data))
+            finally:
+                loop.close()
+
+        # 使用路線ID和方向作為快取鍵值
+        route_key = f"{selected_route_id}_{direction}"
+        route_coords_list = get_cached_route_data(route_key)
         
-        for i in range(len(valid_stops)-1):
-            start = valid_stops[i]
-            end = valid_stops[i+1]
-            route_coords = get_route_between_points(
-                start['StopPosition']['PositionLon'],
-                start['StopPosition']['PositionLat'],
-                end['StopPosition']['PositionLon'],
-                end['StopPosition']['PositionLat']
-            )
-            
+        # 繪製所有路線
+        for route_coords in route_coords_list:
             if route_coords:
                 # OSRM 返回的座標是 [lon, lat]，需要轉換為 [lat, lon]
                 path_coords = [[coord[1], coord[0]] for coord in route_coords]
